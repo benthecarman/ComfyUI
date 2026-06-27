@@ -351,10 +351,16 @@ def prompt_worker(q, server_instance):
     need_gc = False
     gc_collect_interval = 10.0
 
+    unload_ttl = args.unload_models_ttl
+    last_activity = time.perf_counter()
+    models_resident = False
+
     while True:
         timeout = 1000.0
         if need_gc:
             timeout = max(gc_collect_interval - (current_time - last_gc_collect), 0.0)
+        if unload_ttl > 0 and models_resident:
+            timeout = min(timeout, max(unload_ttl - (time.perf_counter() - last_activity), 0.0))
 
         queue_item = q.get(timeout=timeout)
         if queue_item is not None:
@@ -372,6 +378,8 @@ def prompt_worker(q, server_instance):
             e.execute(item[2], prompt_id, extra_data, item[4])
 
             need_gc = True
+            last_activity = time.perf_counter()
+            models_resident = True
 
             remove_sensitive = lambda prompt: prompt[:5] + prompt[6:]
             q.task_done(item_id,
@@ -407,6 +415,15 @@ def prompt_worker(q, server_instance):
 
         if free_memory:
             e.reset()
+            need_gc = True
+            last_gc_collect = 0
+
+        if (unload_ttl > 0 and models_resident and queue_item is None
+                and (time.perf_counter() - last_activity) >= unload_ttl):
+            logging.info(f"Unloading all models after {unload_ttl:.0f}s of inactivity")
+            comfy.model_management.unload_all_models()
+            e.reset()
+            models_resident = False
             need_gc = True
             last_gc_collect = 0
 
